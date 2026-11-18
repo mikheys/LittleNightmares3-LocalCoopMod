@@ -19,6 +19,12 @@ Little Nightmares III only offers online co-op. LN3Couch lets a second person on
 
 ---
 
+## Dual monitors in this fork
+
+This fork adds fixed monitor assignments for Player 1 and Player 2 to LN3Couch v9.15.8. In **Co-op → Dual monitors**, select a display for each player. Menus and cutscenes can be mirrored to both displays or shown on Player 1's display with the other one darkened. The Video and Advanced Graphics pages use a single-display viewport while they are open.
+
+Install [upstream LN3Couch v9.15.8](https://github.com/EugeneErg/LittleNightmares3-LocalCoopMod/releases/tag/v9.15.8) first, then use the patch and instructions in the [Dual Monitors release](https://github.com/mikheys/LittleNightmares3-LocalCoopMod/releases/tag/dual-monitors-v1.0.0). The installer backs up the original script and includes a rollback option.
+
 ## Features
 
 ### Two real players

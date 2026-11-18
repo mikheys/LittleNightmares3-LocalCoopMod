@@ -101,6 +101,7 @@ local S = {
   menuOpen = false, menu = nil, sel = 1, capture = nil, toast = nil, toastUntil = 0,
   drawSeen = false,
 }
+S.monitors = require("monitors")
 local TICKS = 0
 -- v9.15.7: время в секундах — настоящее (по часам игры), а не «кадры / 60»:
 -- мод получает не 60 тактов в секунду, а сколько успевает игра (в тяжёлых
@@ -406,6 +407,7 @@ S.splitAlways = function()
   return s == "always_left_right" or s == "always_top_bottom"
 end
 S.layoutLR = function()
+  if S.monitors.active then return S.monitors.horizontal end
   if CFG.split_layout_force == "left_right" then return true end
   if CFG.split_layout_force == "top_bottom" then return false end
   local f = S.sidesForced(); if f ~= nil then return f end
@@ -1129,7 +1131,7 @@ S.copyTick = function()
     if on then S.copy.untilF = S.frames + 600 end
   end)
   -- v9.15.7: кукла перешла к другому, экран разделён — первым ставим держащего
-  if S.twoWorlds() and S.split and S.frames % 15 == 7 then
+  if not S.monitors.active and S.twoWorlds() and S.split and S.frames % 15 == 7 then
     -- куклы ни у кого — порядок как обычно, по тому, где стоят герои
     local hh = S.lightOwner()
     local want
@@ -1148,7 +1150,9 @@ S.copyTick = function()
     if S.split then
       pcall(S.applySplitAspect, true)
       local hh = S.lightOwner()
-      if on and hh and S.p2First ~= (hh == S.buddy) then S.p2First = (hh == S.buddy); pcall(S.setPlayerOrder, S.p2First) end
+      if not S.monitors.active and on and hh and S.p2First ~= (hh == S.buddy) then
+        S.p2First = (hh == S.buddy); pcall(S.setPlayerOrder, S.p2First)
+      end
     end
   end
 end
@@ -1310,6 +1314,7 @@ local function wantSplit()
   if S.inCutscene() then return false end
   if CFG.layer_overlay ~= false then S.copyTick() end
   local mode = CFG.split
+  if S.monitors.active then return not S.monitors.shared end
   if mode == "always" or S.splitAlways() then return true end
   if mode == "never" then return false end
   if mode == "auto" and not VIS.fallback then
@@ -1601,7 +1606,7 @@ S.setPlayerOrder = function(p2First)
   if n ~= 2 then return end
   local a1, a2 = arr[1], arr[2]
   local firstIsP2 = valid(a1) and a1:GetAddress() == lp2:GetAddress()
-  if firstIsP2 == (p2First and true or false) then return end
+  if firstIsP2 == p2First then S.playersSwapped = firstIsP2; return true end
   local want1, want2 = (p2First and lp2 or lp1), (p2First and lp1 or lp2)
   local ok, err = pcall(function() arr[1] = want1; arr[2] = want2 end)
   local now1 = nil; pcall(function() now1 = arr[1] end)
@@ -1609,6 +1614,7 @@ S.setPlayerOrder = function(p2First)
   S.playersSwapped = held and p2First or false
   trail(string.format("экран: порядок игроков %s — %s%s", p2First and "второй первым" or "обычный",
     held and "получилось" or "не получилось", ok and "" or (" (" .. tostring(err) .. ")")))
+  return held
 end
 setSplitVisible = function(on)
   try("split visible", function()
@@ -1631,6 +1637,31 @@ setSplitVisible = function(on)
   if not on then
     pcall(S.applySplitAspect, false); S.splitLR, S.p2First = nil, false
     if S.playersSwapped then pcall(S.setPlayerOrder, false) end
+  end
+end
+
+S.applyMonitorOrder = function()
+  local m = S.monitors
+  local layoutChanged = S.splitLR ~= m.horizontal
+  if S.split and S.frames % 12 == 0 then
+    local p1, p2 = pcId(S.pc1), pcId(S.pc2)
+    local g = gms()
+    layoutChanged = layoutChanged or (m.routeKnown and (m.routeP1 ~= p1 or m.routeP2 ~= p2))
+      or g.TwoPlayerSplitscreenLayout ~= (m.horizontal and 1 or 0) or not g.bUseSplitscreen
+    m.routeP1, m.routeP2, m.routeKnown = p1, p2, true
+  end
+  local twoWorlds = S.tw2.native and S.twoWorlds() and CFG.two_worlds_p2 ~= false
+  local holder = twoWorlds and S.lightOwner() or nil
+  local holderIsP2
+  if holder then holderIsP2 = holder == S.buddy end
+  local first = m.renderFirst(m.p2First, twoWorlds, holderIsP2)
+  S.splitLR, S.p2Geo = m.horizontal, m.p2First
+  if S.p2First ~= first or (S.playersSwapped or false) ~= first then
+    if S.setPlayerOrder(first) then S.p2First = first end
+  end
+  if layoutChanged and S.split then
+    setSplitVisible(true)
+    S.applySplitAspect(true)
   end
 end
 
@@ -1663,7 +1694,19 @@ local function updateSplit()
     S.wantWhyAt = S.frames
     trail(string.format("экран: хочу разделить, но после прошлого переключения прошло %.1f с", now() - S.splitChangedAt))
   end
-  if want == S.split or now() - S.splitChangedAt < 1.0 then return end
+  if want and S.monitors.active then
+    if S.split and not S.real then S.applyMonitorOrder() end
+    S.monitorSplit = true
+  elseif S.monitorSplit then
+    S.monitorSplit = false
+    if want and S.split then
+      S.decideSplitSides()
+      S.setPlayerOrder(CFG.split_swap_sides ~= false and S.p2First or false)
+      setSplitVisible(true)
+      S.applySplitAspect(true)
+    end
+  end
+  if want == S.split or (not S.monitors.active and now() - S.splitChangedAt < 1.0) then return end
   S.splitChangedAt = now()
   if want then
     if not S.nativeCam then
@@ -1692,7 +1735,12 @@ local function updateSplit()
         S.pruneLocalPlayers(S.pc2, "перед разделением экрана")
       end
     end)
-    pcall(S.decideSplitSides); if CFG.split_swap_sides ~= false then pcall(S.setPlayerOrder, S.p2First) end
+    if S.monitors.active then
+      S.applyMonitorOrder()
+    else
+      pcall(S.decideSplitSides)
+      if CFG.split_swap_sides ~= false then pcall(S.setPlayerOrder, S.p2First) end
+    end
   end
   setSplitVisible(want)
   pcall(S.applySplitAspect, want)
@@ -1804,6 +1852,15 @@ S.EN = {
   ["Геймпад №1 у"] = "Gamepad #1 belongs to", ["игрока 1"] = "Player 1", ["игрока 2"] = "Player 2",
   ["Найти геймпад игрока 2"] = "Find Player 2's gamepad",
   ["Экран"] = "Screen",
+  ["Два монитора"] = "Dual monitors",
+  ["Монитор игрока 1"] = "Player 1 monitor",
+  ["Монитор игрока 2"] = "Player 2 monitor",
+  ["Меню и кат-сцены"] = "Menus and cutscenes",
+  ["На обоих мониторах"] = "On both monitors",
+  ["Только у игрока 1"] = "On Player 1 monitor",
+  ["Выберите два подходящих монитора"] = "Select two compatible monitors",
+  ["Переключите игру в оконный режим"] = "Switch the game to windowed mode",
+  ["Вывод на мониторы недоступен"] = "Monitor output unavailable",
   ["Авто (когда не видно)"] = "Auto (split when needed)", ["По расстоянию"] = "By distance",
   ["Всегда разделён"] = "Always split", ["Всегда общий"] = "Always shared",
   ["Разделение"] = "Split", ["Авто (как стоят герои)"] = "Auto (by where heroes are)", ["Горизонтально"] = "Horizontal", ["Вертикально"] = "Vertical",
@@ -6283,6 +6340,7 @@ S.bowAimTick = function()
 end
 local function applyInputReal()
   local _, _, lx, ly, p2jump, grab = readP2()
+  if S.split and S.monitors.active and not S.inCutscene() then pcall(S.applyMonitorOrder) end
   pcall(S.midCamTick)
   pcall(S.bowAimTick)
   pcall(S.holdCam1)
@@ -6564,6 +6622,62 @@ local ACTIONS_PAD = { { "jump", "Прыжок" }, { "grab", "Схватить / 
 local buildMenu
 local function changed() saveSettings() end
 
+S.openMonitors = function()
+  S.monitors.scan()
+  S.monitors.defaults(CFG)
+end
+S.monitorModeLabel = function()
+  if not CFG.monitor_enabled then return "выключен" end
+  local status = S.monitors.status
+  if status == "pair" then return "Выберите два подходящих монитора" end
+  if status == "window" or status == "position" then return "Переключите игру в оконный режим" end
+  if status == "helper" or status == "projection" or status == "request" then
+    return "Вывод на мониторы недоступен"
+  end
+  return "включён"
+end
+S.toggleMonitors = function()
+  if not CFG.monitor_enabled and not (CFG.monitor_p1 and CFG.monitor_p2) then
+    toast("Выберите два подходящих монитора"); return
+  end
+  CFG.monitor_enabled = not CFG.monitor_enabled
+  S.monitors.status = CFG.monitor_enabled and "ready" or "off"
+  changed()
+end
+S.selectMonitor = function(player, dir)
+  S.monitors.cycle(CFG, player, dir)
+  changed()
+end
+S.monitorSharedLabel = function()
+  return CFG.monitor_shared == "dark" and "Только у игрока 1" or "На обоих мониторах"
+end
+S.toggleMonitorShared = function()
+  CFG.monitor_shared = CFG.monitor_shared == "dark" and "mirror" or "dark"
+  changed()
+end
+S.monitorMenu = function()
+  local items = {
+    { label = function() return "Два монитора" end, value = S.monitorModeLabel, act = S.toggleMonitors },
+  }
+  for player = 1, 2 do
+    items[#items + 1] = {
+      label = function() return player == 1 and "Монитор игрока 1" or "Монитор игрока 2" end,
+      value = function() return S.monitors.label(CFG["monitor_p" .. player]) end,
+      left = function() S.selectMonitor(player, -1) end,
+      right = function() S.selectMonitor(player, 1) end,
+    }
+  end
+  items[#items + 1] = {
+    label = function() return "Меню и кат-сцены" end, value = S.monitorSharedLabel,
+    left = S.toggleMonitorShared, right = S.toggleMonitorShared,
+  }
+  items[#items + 1] = {
+    label = function() return "<  Назад" end, value = function() return "" end,
+    act = function() S.menu, S.sel = buildMenu("main"), 1 end,
+  }
+  return { title = "Два монитора", items = items, back = "main" }
+end
+
 local function mainMenu()
   return {
     title = "КООПЕРАТИВ — LN3Couch",
@@ -6582,6 +6696,8 @@ local function mainMenu()
         right = function() CFG.split_sides = optCycle(S.SPLIT_SIDES, CFG.split_sides or "auto", 1); changed() end },
       { label = function() return "Кнопки игрока 2  >" end, value = function() return "" end,
         act = function() S.menu, S.sel = buildMenu("keys"), 1 end },
+      { label = function() return "Два монитора" end, value = S.monitorModeLabel,
+        act = function() S.openMonitors(); S.menu, S.sel = buildMenu("monitors"), 1 end },
       { label = function() return "Сбросить настройки" end, value = function() return "" end,
         act = function() CFG = deepcopy(DEFAULTS); CFG.split = "auto"; applyLayout(); changed(); toast("Настройки сброшены") end },
       { label = function() return "Закрыть  (F9)" end, value = function() return "" end, act = function() S.menuOpen = false end },
@@ -6604,7 +6720,11 @@ local function keysMenu()
     act = function() S.menu, S.sel = buildMenu("main"), 7 end }
   return { title = pad and "КНОПКИ ИГРОКА 2 — геймпад" or "КЛАВИШИ ИГРОКА 2 — клавиатура", items = items, back = "main" }
 end
-buildMenu = function(which) if which == "keys" then return keysMenu() end return mainMenu() end
+buildMenu = function(which)
+  if which == "keys" then return keysMenu() end
+  if which == "monitors" then return S.monitorMenu() end
+  return mainMenu()
+end
 
 local function anyCaptureDown()
   local src = CFG.device == "gamepad" and p2Source() or S.pc1
@@ -6841,6 +6961,7 @@ local function coopItems()
     { function() return "Разделение: " .. optTitle(S.SPLIT_SIDES, CFG.split_sides or "auto") end,
       function() CFG.split_sides = optCycle(S.SPLIT_SIDES, CFG.split_sides or "auto", 1); saveSettings() end },
     { function() return "Кнопки игрока 2" end, function() showPage("keys") end },
+    { function() return "Два монитора" end, function() S.openMonitors(); showPage("monitors") end },
     { function() return "Сбросить настройки" end, function() CFG = deepcopy(DEFAULTS); CFG.split = "auto"; applyLayout(); saveSettings(); PM.rebuildKeys = true end },
     { function() return "Назад" end, function() showPage(nil) end },
   }
@@ -6864,8 +6985,20 @@ local function refreshLabels()
   for _, pg in pairs(PM.pages) do for _, e in ipairs(pg) do if valid(e.btn) then setBtnText(e.btn, e.label()) end end end
 end
 
+S.monitorItems = function()
+  return {
+    { function() return "Два монитора: " .. S.monitorModeLabel() end, S.toggleMonitors },
+    { function() return "Монитор игрока 1: " .. S.monitors.label(CFG.monitor_p1) end,
+      function() S.selectMonitor(1, 1) end },
+    { function() return "Монитор игрока 2: " .. S.monitors.label(CFG.monitor_p2) end,
+      function() S.selectMonitor(2, 1) end },
+    { function() return "Меню и кат-сцены: " .. S.monitorSharedLabel() end, S.toggleMonitorShared },
+    { function() return "Назад" end, function() showPage("coop") end },
+  }
+end
+
 local function buildPage(name)
-  local items = name == "coop" and coopItems() or keyItems()
+  local items = name == "coop" and coopItems() or name == "monitors" and S.monitorItems() or keyItems()
   local list = {}
   for _, it in ipairs(items) do
     local e = { label = it[1] }
@@ -7064,14 +7197,40 @@ S.uiDumpTick = function()
     end
   end
 end
-local pauseOpenCache, pauseOpenAt = false, -100
-function lastPauseOpen()
-  if S.frames - pauseOpenAt >= 15 then
-    pauseOpenAt = S.frames; pauseOpenCache = false
-    for _, w in ipairs(FindAllOf("PauseMenuWidget_C") or {}) do
-      local ok, v = pcall(function() return w:IsVisible() end)
-      if valid(w) and ok and v then pauseOpenCache = true end
+S.visibleGameMenu = function(class)
+  for _, widget in ipairs(FindAllOf(class) or {}) do
+    if valid(widget) then
+      local ok, visible = pcall(function() return widget:IsVisible() end)
+      if ok and visible then return true end
     end
+  end
+  return false
+end
+
+local pauseOpenCache, pauseOpenAt = false, -100
+S.gameMenuState = function()
+  if S.frames >= (S.gameMenuCheckAt or 0) then
+    S.gameMenuCheckAt = S.frames + 6
+    S.settingsMenuVisible, S.videoMenuVisible = false, false
+    for _, widget in ipairs(FindAllOf("KosmosUISettingsWidget") or {}) do
+      if valid(widget) and widget:IsVisible() then
+        S.settingsMenuVisible = true
+        local class = widget:GetClass():GetFName():ToString()
+        if class == "VideoSettingsWidget_C" or class == "GraphicsMenuWidget_C" then
+          S.videoMenuVisible = true
+          break
+        end
+      end
+    end
+    S.disconnectMenuVisible = S.visibleGameMenu("ControllerDisconnectionWidget_C")
+  end
+  return S.settingsMenuVisible or S.disconnectMenuVisible, S.videoMenuVisible
+end
+function lastPauseOpen(fast)
+  if fast and PM.kind == "pause" and valid(PM.widget) and PM.widget:IsVisible() then return true end
+  if S.frames - pauseOpenAt >= (fast and 3 or 15) then
+    pauseOpenAt = S.frames
+    pauseOpenCache = S.visibleGameMenu("PauseMenuWidget_C")
   end
   return pauseOpenCache
 end
@@ -7160,6 +7319,92 @@ local function captureTick()
 end
 
 ------------------------------------------------------------------ главный цикл
+S.monitorVideoFields = { "ResolutionSizeX", "ResolutionSizeY", "LastUserConfirmedResolutionSizeX",
+  "LastUserConfirmedResolutionSizeY", "FullscreenMode", "LastConfirmedFullscreenMode" }
+S.monitorSetRes = function(res)
+  UEHelpers.GetKismetSystemLibrary():ExecuteConsoleCommand(
+    UEHelpers.GetWorld(), "r.SetRes " .. res, findPC1())
+end
+S.restoreMonitorVideoFields = function(video)
+  local settings = UEHelpers.GetEngine().GameUserSettings
+  for key, value in pairs(video) do
+    if settings[key] ~= value then settings[key] = value end
+  end
+end
+
+S.syncMonitorWindow = function(coop)
+  local m = S.monitors
+  local use = CFG.monitor_enabled and (coop or S.coopWanted())
+  local time = now()
+  if use and not m.engineSession then
+    if not valid(findPC1()) then return end
+    m.engineSession = true
+    try("monitor engine window", function()
+      local settings = UEHelpers.GetEngine().GameUserSettings
+      local fields = {}
+      for _, key in ipairs(S.monitorVideoFields) do fields[key] = settings[key] end
+      m.video = fields
+      local suffix = ({ [0] = "f", [1] = "wf", [2] = "w" })[settings:GetFullscreenMode()]
+      local res = settings:GetScreenResolution()
+      if suffix and res.X > 0 and res.Y > 0 then
+        local size = string.format("%dx%d", res.X, res.Y)
+        m.engineResolution = size .. suffix
+        if suffix ~= "w" then
+          S.monitorSetRes(size .. "w")
+          m.engineWait = time + 0.35
+        end
+      end
+    end)
+  end
+  if use and m.engineWait and time < m.engineWait then return end
+  local nativeMenu, videoMenu = false, false
+  if use then nativeMenu, videoMenu = S.gameMenuState() end
+  local paused = use and (nativeMenu or lastPauseOpen(true))
+  local forced = use and (not coop or not usablePC2(S.pc2) or S.menuOpen or nativeMenu or S.inCutscene())
+  local shared = use and m.shareForPause(paused, forced)
+  if not use then
+    m.transition = nil
+  elseif m.active and (m.shared ~= shared or m.singleMenu ~= videoMenu) and
+      (not m.transition or m.transition.shared ~= shared or m.transition.singleMenu ~= videoMenu) then
+    m.transition = { shared = shared, singleMenu = videoMenu, started = time }
+  end
+  if m.transition then
+    local elapsed = time - m.transition.started
+    if elapsed >= 0.5 then
+      m.transition = nil
+    elseif elapsed >= 0.08 and m.shared == shared and m.singleMenu == videoMenu and S.split == (not shared) and valid(S.pc1) then
+      local size = StaticFindObject("/Script/UMG.Default__WidgetLayoutLibrary"):GetViewportSize(S.pc1)
+      if size.X == m.width and size.Y == m.height then m.transition = nil end
+    end
+  end
+  m.sync(CFG, use, shared, time, m.transition ~= nil, videoMenu)
+  if m.active then
+    if m.shouldResumeFocusPause(paused, forced, time) and PM.kind == "pause" and not PM.page and
+        valid(PM.widget) and PM.widget:IsVisible() and valid(PM.template) then
+      m.resumeSent = true
+      try("resume after focus", m.resumeNative)
+      trail("мониторы: закрываю автопаузу после возврата фокуса")
+    end
+    local target = string.format("%dx%dw", m.width, m.height)
+    if m.target ~= target then
+      try("monitor viewport resolution", S.monitorSetRes, target)
+      m.target, m.nextCheck = target, time + 0.2
+      trail("мониторы: " .. target .. (m.shared and " (общий экран)" or " (две камеры)"))
+    end
+    if m.shared and S.split then
+      S.out.stop()
+      setSplitVisible(false)
+    end
+  end
+  -- The game can copy a window resize into the fullscreen preferences it saves on exit.
+  if m.video then try("preserve video settings", S.restoreMonitorVideoFields, m.video) end
+  if not use and m.engineSession then
+    m.engineSession, m.engineWait, m.target = nil, nil, nil
+    if m.engineResolution then try("restore engine window", S.monitorSetRes, m.engineResolution) end
+    m.engineResolution, m.video = nil, nil
+  end
+end
+
 local function Tick()
   TICKS = TICKS + 1
   S.frames = S.frames + 1
@@ -7168,9 +7413,17 @@ local function Tick()
   -- последняя отметка в trail.txt покажет, на каком шаге)
   local crumb = S.crumbUntil and S.frames < S.crumbUntil and S.frames % 30 == 0
   if crumb then trail("шаг: интерфейс") end
-  try("updateUI", updateUI)
   if crumb then trail("шаг: возобновление") end
   try("resumeTick", resumeTick)
+  if CFG.monitor_enabled or S.monitors.engineSession then
+    local previous = S.monitors.status
+    try("monitors", S.syncMonitorWindow, S.coop)
+    if previous ~= S.monitors.status then
+      trail("мониторы: " .. S.monitors.status)
+      if PM.page == "monitors" then try("monitor labels", refreshLabels) end
+    end
+  end
+  try("updateUI", updateUI)
   if crumb then trail("шаг: меню паузы") end
   if S.detectPending and not lastPauseOpen() then S.detectPending = false; try("startDetect", startDetect) end
   if S.detect then try("detectTick", detectTick) end
@@ -7359,4 +7612,4 @@ local function dumpTree(w, depth, out)
     if okr and valid(root) then dumpTree(root, depth + 1, out) end
   end
 end
-log("v9.15.8 загружен. F9 — меню кооператива")
+log("v9.15.8 + два монитора загружен. F9 — меню кооператива")
